@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: resqnet
+      POSTGRES_USER: resqnet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-resqnet_dev_only}
+    ports: ["5432:5432"]
+    volumes: ["resqnet_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resqnet -d resqnet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  api:
+    build: ./backend
+    environment:
+      ENVIRONMENT: development
+      SECRET_KEY: ${SECRET_KEY:-local-compose-secret-change-before-deploy}
+      DATABASE_URL: postgresql+psycopg://resqnet:${POSTGRES_PASSWORD:-resqnet_dev_only}@db:5432/resqnet
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+      SEED_DEMO_DATA: "true"
+    ports: ["8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000/api/v1
+    ports: ["8080:80"]
+    depends_on: [api]
+volumes:
+  resqnet_pgdata:
