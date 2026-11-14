@@ -36,7 +36,6 @@ class Organization(Base):
     city: Mapped[str] = mapped_column(String(100), default="Salem", nullable=False)
     state: Mapped[str] = mapped_column(String(100), default="Tamil Nadu", nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 class ResponderProfile(Base):

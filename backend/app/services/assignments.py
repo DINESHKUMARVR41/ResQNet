@@ -67,6 +67,9 @@ def issue_next_offer(db: Session, case: Case, actor_id: str | None = None):
     db.add(offer); db.flush()
     db.add(CaseEvent(case_id=case.id, actor_id=actor_id, event_type="ASSIGNMENT_OFFERED", from_status=previous, to_status=case.status,
         message=f"Assignment offer #{offer.attempt_no} sent to {candidate['user'].full_name}; response due in {OFFER_MINUTES} minutes."))
+    from app.services.notifications import create_notification
+    create_notification(db, candidate["user"].id, "ASSIGNMENT_OFFERED", "New rescue assignment", f"You have a new offer for case {case.public_id}. Please respond before the deadline.", case.id)
+    create_notification(db, case.reporter_id, "ASSIGNMENT_OFFERED", "Responder being contacted", f"A responder has been offered case {case.public_id}.", case.id)
     db.commit(); db.refresh(offer)
     return offer
 
@@ -83,6 +86,11 @@ def process_expired_offers(db: Session):
         if case and case.status == "ASSIGNMENT_PENDING":
             db.add(CaseEvent(case_id=case.id, event_type="OFFER_EXPIRED", from_status=case.status,
                 message=f"Responder acknowledgement deadline expired for offer #{offer.attempt_no}; escalation initiated."))
+            from app.services.notifications import create_notification
+            expired_profile = db.get(ResponderProfile, offer.responder_id)
+            if expired_profile:
+                create_notification(db, expired_profile.user_id, "ASSIGNMENT_EXPIRED", "Assignment offer expired", f"Your offer for {case.public_id} expired without a response.", case.id)
+            create_notification(db, case.reporter_id, "ASSIGNMENT_ESCALATED", "Finding another responder", f"The acknowledgement window for {case.public_id} expired. ResQNet is checking the next eligible responder.", case.id)
             db.flush()
             issue_next_offer(db, case)
         else:
@@ -92,6 +100,12 @@ def process_expired_offers(db: Session):
     for handoff in pending_handoffs:
         handoff.status = "EXPIRED"; handoff.responded_at = now
         db.add(CaseEvent(case_id=handoff.case_id, event_type="HANDOFF_EXPIRED", message="Organization handoff was not accepted before its deadline. Existing ownership remains unchanged."))
+        from app.services.notifications import create_notification
+        for organization_id in (handoff.from_organization_id, handoff.to_organization_id):
+            if organization_id:
+                coordinators = db.scalars(select(User).where(User.role == UserRole.COORDINATOR, User.organization_id == organization_id, User.is_active.is_(True))).all()
+                for coordinator in coordinators:
+                    create_notification(db, coordinator.id, "HANDOFF_EXPIRED", "Case handoff expired", "A handoff request expired. Existing case ownership was not changed.", handoff.case_id)
         processed += 1
     if pending_handoffs: db.commit()
     return processed

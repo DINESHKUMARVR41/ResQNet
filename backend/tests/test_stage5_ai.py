@@ -5,13 +5,13 @@ import pytest
 
 def _register(client, email, role="citizen", name="Test User"):
     return client.post("/api/v1/auth/register", json={
-        "full_name": name, "email": email, "password": "Test1234!",
+        "full_name": name, "email": email, "password": "StrongPass!2026",
         "role": role,
     })
 
 
 def _login(client, email):
-    r = client.post("/api/v1/auth/login", json={"email": email, "password": "Test1234!"})
+    r = client.post("/api/v1/auth/login", json={"email": email, "password": "StrongPass!2026"})
     return r.json()["access_token"]
 
 

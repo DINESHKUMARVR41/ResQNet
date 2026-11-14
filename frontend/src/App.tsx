@@ -2,18 +2,20 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { Link, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { Activity, ArrowRight, Bell, HeartHandshake, LayoutDashboard, LogOut, ShieldCheck, Users, PawPrint, Plus, MapPin, RefreshCw, Clock3, AlertTriangle, Mic, MicOff, BarChart2, CheckCircle, XCircle } from 'lucide-react'
 import {
-  api, caseApi, responderApi, type User, type UserRole, type RescueCase, type AssignmentOffer, progressApi,
-  aiApi, notifApi, evidenceApi, analyticsApi, progressExtApi,
-  type IncidentExtraction, type Notification, type Evidence, type AnalyticsSummary
+  api, ApiError, caseApi, responderApi, type User, type UserRole, type RescueCase, type AssignmentOffer, progressApi,
+  aiApi, notifApi, evidenceApi, analyticsApi, progressExtApi, adminApi,
+  type IncidentExtraction, type Notification, type Evidence, type AnalyticsSummary, handoffApi, type Handoff, type Organization
 } from './lib/api'
 
 type Session = { token: string; user: User }
 const demoAccounts: { label: string; email: string; role: UserRole }[] = [
   { label: 'Citizen', email: 'citizen@resqnet.demo', role: 'citizen' },
   { label: 'Rescuer', email: 'rescuer@resqnet.demo', role: 'rescuer' },
-  { label: 'NGO coordinator', email: 'coordinator@resqnet.demo', role: 'coordinator' },
+  { label: 'NGO', email: 'ngo@resqnet.demo', role: 'coordinator' },
+  { label: 'Coordinator', email: 'coordinator@resqnet.demo', role: 'coordinator' },
   { label: 'Administrator', email: 'admin@resqnet.demo', role: 'admin' },
 ]
+const DEMO_PASSWORD = 'ResQNetDemo!2026'
 function App() {
   const [session, setSession] = useState<Session | null>(() => { const raw = localStorage.getItem('resqnet-session'); return raw ? JSON.parse(raw) : null })
   const [checking, setChecking] = useState(Boolean(session))
@@ -27,8 +29,8 @@ function Landing() { return <main className="landing"><nav className="topbar"><d
 function AuthPage({ onAuth, register = false }: { onAuth: (session: Session) => void; register?: boolean }) {
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [role, setRole] = useState<'citizen'|'rescuer'>('citizen'); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const navigate = useNavigate()
   const submit = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(''); try { const result = register ? await api.register({ full_name: name, email, password, role }) : await api.login(email, password); onAuth({ token: result.access_token, user: result.user }); navigate('/') } catch (e) { setError(e instanceof Error ? e.message : 'Unable to authenticate') } finally { setBusy(false) } }
-  const demoLogin = async (account: typeof demoAccounts[number]) => { setEmail(account.email); setPassword('ResQNetDemo!2026'); setBusy(true); setError(''); try { const result = await api.login(account.email, 'ResQNetDemo!2026'); onAuth({ token: result.access_token, user: result.user }); navigate('/') } catch (e) { setError(e instanceof Error ? e.message : 'Demo login failed') } finally { setBusy(false) } }
-  return <main className="auth-layout"><section className="auth-aside"><Link to="/" className="brand brand-light"><span className="brand-mark"><PawPrint size={21}/></span>ResQNet</Link><div><div className="eyebrow eyebrow-light">A MORE ACCOUNTABLE WAY TO RESCUE</div><h1>From first report<br/>to verified care.</h1><p>One shared picture of every emergency, with clear ownership and no silent handoffs.</p></div><small>DEVELOPMENT ENVIRONMENT · SYNTHETIC DEMO ACCOUNTS</small></section><section className="auth-main"><div className="auth-box"><Link to="/" className="back-link">← Back to home</Link><h2>{register ? 'Create your account' : 'Welcome back'}</h2><p className="muted">{register ? 'Join the ResQNet response community.' : 'Sign in to your ResQNet workspace.'}</p><form onSubmit={submit}>{register && <label>Full name<input required minLength={2} value={name} onChange={e=>setName(e.target.value)} placeholder="Your name"/></label>}<label>Email address<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required minLength={10} type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 10 characters"/></label>{register && <label>Account type<select value={role} onChange={e=>setRole(e.target.value as 'citizen'|'rescuer')}><option value="citizen">Citizen</option><option value="rescuer">Rescuer</option></select></label>}{error && <div className="error-box">{error}</div>}<button className="button button-primary full-width" disabled={busy}>{busy ? 'Please wait…' : register ? 'Create account' : 'Sign in'} <ArrowRight size={16}/></button></form>{!register && <div className="demo-panel"><div className="demo-title"><span>DEMO ACCESS</span><small>All passwords: ResQNetDemo!2026</small></div><div className="demo-grid">{demoAccounts.map(account=><button key={account.role} disabled={busy} onClick={()=>demoLogin(account)}>{account.label}<ArrowRight size={14}/></button>)}</div></div>}<p className="switch-auth">{register ? 'Already have an account?' : 'New to ResQNet?'} <Link to={register ? '/login' : '/register'}>{register ? 'Sign in' : 'Create account'}</Link></p></div></section></main>
+  const demoLogin = async (account: typeof demoAccounts[number]) => { setEmail(account.email); setPassword(DEMO_PASSWORD); setBusy(true); setError(''); try { const result = await api.login(account.email, DEMO_PASSWORD); if (result.user.role !== account.role) throw new Error('The demo account has an unexpected role. Please reseed the demo accounts.'); onAuth({ token: result.access_token, user: result.user }); navigate('/') } catch (e) { setError(e instanceof ApiError && e.status === 401 ? 'Demo login failed. Please verify the demo account.' : e instanceof Error ? e.message : 'Unable to authenticate') } finally { setBusy(false) } }
+  return <main className="auth-layout"><section className="auth-aside"><Link to="/" className="brand brand-light"><span className="brand-mark"><PawPrint size={21}/></span>ResQNet</Link><div><div className="eyebrow eyebrow-light">A MORE ACCOUNTABLE WAY TO RESCUE</div><h1>From first report<br/>to verified care.</h1><p>One shared picture of every emergency, with clear ownership and no silent handoffs.</p></div><small>DEVELOPMENT ENVIRONMENT · SYNTHETIC DEMO ACCOUNTS</small></section><section className="auth-main"><div className="auth-box"><Link to="/" className="back-link">← Back to home</Link><h2>{register ? 'Create your account' : 'Welcome back'}</h2><p className="muted">{register ? 'Join the ResQNet response community.' : 'Sign in to your ResQNet workspace.'}</p><form onSubmit={submit}>{register && <label>Full name<input required minLength={2} value={name} onChange={e=>setName(e.target.value)} placeholder="Your name"/></label>}<label>Email address<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required minLength={10} type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 10 characters"/></label>{register && <label>Account type<select value={role} onChange={e=>setRole(e.target.value as 'citizen'|'rescuer')}><option value="citizen">Citizen</option><option value="rescuer">Rescuer</option></select></label>}{error && <div className="error-box">{error}</div>}<button className="button button-primary full-width" disabled={busy}>{busy ? 'Please wait…' : register ? 'Create account' : 'Sign in'} <ArrowRight size={16}/></button></form>{!register && <div className="demo-panel"><div className="demo-title"><span>DEMO ACCESS</span><small>All passwords: {DEMO_PASSWORD}</small></div><div className="demo-grid">{demoAccounts.map(account=><button key={`${account.role}-${account.email}`} disabled={busy} onClick={()=>demoLogin(account)}>{account.label}<ArrowRight size={14}/></button>)}</div></div>}<p className="switch-auth">{register ? 'Already have an account?' : 'New to ResQNet?'} <Link to={register ? '/login' : '/register'}>{register ? 'Sign in' : 'Create account'}</Link></p></div></section></main>
 }
 
 // ── Notifications Bell ─────────────────────────────────────────────────────
@@ -170,14 +172,14 @@ function VoicePanel({ token, casePublicId }: { token: string; casePublicId?: str
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [duration, setDuration] = useState(0)
   const [uploading, setUploading] = useState(false)
-  const [uploadMsg, setUploadMsg] = useState('')
+  const [uploadMsg, setUploadMsg] = useState(''); const [transcript,setTranscript]=useState(''); const [savingTranscript,setSavingTranscript]=useState(false)
   const recRef = useRef<MediaRecorder | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   if (!supported) return <div className="voice-panel voice-unsupported"><Mic size={16}/> Voice recording requires a modern browser</div>
 
   const start = async () => {
-    setChunks([]); setAudioUrl(null); setUploadMsg('')
+    setChunks([]); setAudioUrl(null); setUploadMsg(''); setTranscript('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mr = new MediaRecorder(stream)
@@ -209,10 +211,8 @@ function VoicePanel({ token, casePublicId }: { token: string; casePublicId?: str
     try {
       const blob = new Blob(chunks, { type: 'audio/webm' })
       const fd = new FormData(); fd.append('audio', blob, 'voice-report.webm')
-      await fetch(`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1'}/cases/${casePublicId}/audio-report`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
-      })
-      setUploadMsg('Voice report uploaded successfully!')
+      const result = await api.uploadAudioReport(token, casePublicId, fd)
+      if(result.transcription)setTranscript(result.transcription); setUploadMsg(result.transcription ? 'Transcription is ready for your review.' : (result.note || 'Audio saved. Transcription is not configured; please enter the report description manually.'))
     } catch (e) { setUploadMsg(e instanceof Error ? e.message : 'Upload failed') }
     finally { setUploading(false) }
   }
@@ -238,7 +238,8 @@ function VoicePanel({ token, casePublicId }: { token: string; casePublicId?: str
           </button>
         </div>
       )}
-      {uploadMsg && <div className={uploadMsg.includes('success') ? 'success-box' : 'error-box'} style={{ marginTop: 8 }}>{uploadMsg}</div>}
+      {uploadMsg && <div className="success-box" style={{ marginTop: 8 }}>{uploadMsg}</div>}
+      {transcript && <div style={{marginTop:10}}><label>Review transcription before adding it to your report<textarea value={transcript} onChange={e=>setTranscript(e.target.value)} rows={4}/></label><button type="button" className="button button-primary" disabled={savingTranscript||transcript.trim().length<5} onClick={async()=>{if(!casePublicId)return;setSavingTranscript(true);try{await aiApi.saveVoiceTranscript(token,casePublicId,transcript);setUploadMsg('Reporter-confirmed transcript added to the case.');setTranscript('')}catch(e){setUploadMsg(e instanceof Error?e.message:'Could not save transcript')}finally{setSavingTranscript(false)}}}>{savingTranscript?'Saving…':'Add confirmed transcript to case'}</button></div>}
     </div>
   )
 }
@@ -272,8 +273,8 @@ function EvidencePanel({ token, publicId, onDone }: { token: string; publicId: s
       if (condition) fd.append('animal_condition', condition)
       if (dest) fd.append('destination', dest)
       if (handover) fd.append('handover_details', handover)
-      if (gpsLat) fd.append('gps_latitude', gpsLat)
-      if (gpsLon) fd.append('gps_longitude', gpsLon)
+      if (gpsLat) fd.append('gps_lat', gpsLat)
+      if (gpsLon) fd.append('gps_lon', gpsLon)
       await evidenceApi.submit(token, publicId, fd)
       setMsg('Evidence submitted!'); setOpen(false); setFile(null); setNotes(''); setCondition(''); setDest(''); setHandover('')
       await loadList(); onDone()
@@ -319,7 +320,7 @@ function EvidencePanel({ token, publicId, onDone }: { token: string; publicId: s
               {ev.rescue_notes && <p><b>Notes:</b> {ev.rescue_notes}</p>}
               {ev.animal_condition && <p><b>Condition:</b> {ev.animal_condition}</p>}
               {ev.destination && <p><b>Destination:</b> {ev.destination}</p>}
-              {ev.has_file && <small>File: {ev.mime_type ?? 'attached'} · {ev.file_size ? `${Math.round(ev.file_size / 1024)} KB` : ''}</small>}
+              {ev.has_file && <div><small>File: {ev.mime_type ?? 'attached'} · {ev.file_size ? `${Math.round(ev.file_size / 1024)} KB` : ''}</small> <button type="button" className="button button-light" style={{fontSize:10,padding:'5px 9px'}} onClick={async()=>{try{const blob=await evidenceApi.download(token,publicId,ev.id);const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=ev.id;a.click();URL.revokeObjectURL(url)}catch(e){setErr(e instanceof Error?e.message:'Download failed')}}}>Download file</button></div>}
               <small>{new Date(ev.created_at).toLocaleString()}</small>
             </div>
           ))}
@@ -539,18 +540,24 @@ function AnalyticsDashboard({ token }: { token: string }) {
 function Dashboard({ session, logout }: { session: Session; logout: () => void }) {
   const [summary, setSummary] = useState<{total_cases:number;open_cases:number;available_responders:number;data_label:string}|null>(null)
   const [cases, setCases] = useState<RescueCase[]>([]); const [selected, setSelected] = useState<RescueCase|null>(null); const [offers,setOffers]=useState<AssignmentOffer[]>([])
-  const [error,setError]=useState(''); const [notice,setNotice]=useState(''); const [busy,setBusy]=useState(false)
-  const [activeTab, setActiveTab] = useState<'overview' | 'analytics'>('overview')
+  const [error,setError]=useState(''); const [notice,setNotice]=useState('')
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'map' | 'handoffs' | 'admin'>('overview')
   const canManage = session.user.role === 'coordinator' || session.user.role === 'admin'
   const refresh = async () => { const s = await api.summary(session.token); setSummary(s); const c = await caseApi.list(session.token); setCases(c); if(session.user.role==='rescuer') setOffers(await responderApi.offers(session.token)); if(selected) setSelected(c.find(x=>x.public_id===selected.public_id) ?? selected) }
   useEffect(()=>{refresh().catch(e=>setError(e.message))},[session.token])
   const roleTitle: Record<UserRole,string> = { citizen:'Citizen workspace', rescuer:'Responder workspace', coordinator:'NGO operations', admin:'Administration' }
   const created = async (item: RescueCase) => { setNotice(`Report submitted. Your case ID is ${item.public_id}.`); await refresh(); const latest = await caseApi.get(session.token, item.public_id); setSelected(latest) }
   const triaged = async (item: RescueCase) => { setNotice(`Case ${item.public_id} moved to TRIAGED.`); await refresh(); setSelected(item) }
-  return <div className="dashboard-shell"><aside className="sidebar"><Link to="/" className="brand"><span className="brand-mark"><PawPrint size={21}/></span>ResQNet</Link><div className="workspace-label">WORKSPACE</div><div className={`side-link${activeTab==='overview'?' active':''}`} onClick={()=>setActiveTab('overview')}><LayoutDashboard size={17}/> Overview</div><div className="side-link"><HeartHandshake size={17}/> Emergency cases</div><div className="side-link"><Users size={17}/> Response network</div>{canManage&&<div className={`side-link${activeTab==='analytics'?' active':''}`} onClick={()=>setActiveTab('analytics')}><BarChart2 size={17}/> Analytics</div>}<div className="sidebar-bottom"><div className="user-avatar">{session.user.full_name.slice(0,1).toUpperCase()}</div><div className="user-meta"><b>{session.user.full_name}</b><small>{session.user.role}</small></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17}/></button></div></aside><main className="dashboard-main"><header className="dash-header"><div><div className="eyebrow">RESQNET OPERATIONS</div><h1>{roleTitle[session.user.role]}</h1><p>Good to see you, {session.user.full_name.split(' ')[0]}.</p></div><div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><NotificationBell token={session.token}/><div className="profile-chip"><span className="status-dot"/> Development mode</div></div></header>{error && <div className="error-box">{error}</div>}{notice && <div className="success-box">{notice}<button onClick={()=>setNotice('')}>Dismiss</button></div>}
+  return <div className="dashboard-shell"><aside className="sidebar"><Link to="/" className="brand"><span className="brand-mark"><PawPrint size={21}/></span>ResQNet</Link><div className="workspace-label">WORKSPACE</div><div className={`side-link${activeTab==='overview'?' active':''}`} onClick={()=>setActiveTab('overview')}><LayoutDashboard size={17}/> Overview</div><div className={`side-link${activeTab==='overview'?' active':''}`} onClick={()=>setActiveTab('overview')}><HeartHandshake size={17}/> Emergency cases</div><div className={`side-link${activeTab==='map'?' active':''}`} onClick={()=>setActiveTab('map')}><MapPin size={17}/> Incident map</div>{canManage&&<div className={`side-link${activeTab==='handoffs'?' active':''}`} onClick={()=>setActiveTab('handoffs')}><Users size={17}/> NGO handoffs</div>}{canManage&&<div className={`side-link${activeTab==='analytics'?' active':''}`} onClick={()=>setActiveTab('analytics')}><BarChart2 size={17}/> Analytics</div>}{session.user.role==='admin'&&<div className={`side-link${activeTab==='admin'?' active':''}`} onClick={()=>setActiveTab('admin')}><ShieldCheck size={17}/> Administration</div>}<div className="sidebar-bottom"><div className="user-avatar">{session.user.full_name.slice(0,1).toUpperCase()}</div><div className="user-meta"><b>{session.user.full_name}</b><small>{session.user.role}</small></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17}/></button></div></aside><main className="dashboard-main"><header className="dash-header"><div><div className="eyebrow">RESQNET OPERATIONS</div><h1>{roleTitle[session.user.role]}</h1><p>Good to see you, {session.user.full_name.split(' ')[0]}.</p></div><div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><NotificationBell token={session.token}/><div className="profile-chip"><span className="status-dot"/> Development mode</div></div></header>{error && <div className="error-box">{error}</div>}{notice && <div className="success-box">{notice}<button onClick={()=>setNotice('')}>Dismiss</button></div>}
 
   {activeTab === 'analytics' && canManage ? (
     <AnalyticsDashboard token={session.token}/>
+  ) : activeTab === 'map' ? (
+    <IncidentMap cases={cases}/>
+  ) : activeTab === 'handoffs' && canManage ? (
+    <HandoffWorkspace token={session.token} cases={cases} onChanged={()=>refresh().catch(e=>setError(e.message))}/>
+  ) : activeTab === 'admin' && session.user.role === 'admin' ? (
+    <AdminWorkspace token={session.token}/>
   ) : (
     <>
       <div className="welcome-banner"><div><span className="banner-label">YOUR ROLE · {session.user.role.toUpperCase()}</span><h2>Every case has a next step.</h2><p>Reports are stored in the database. Priority suggestions are rule-based and require human review.</p></div><div className="banner-icon"><HeartHandshake size={42}/></div></div><div className="section-heading"><div><h2>Operational snapshot</h2><p>Counts are read from the connected database.</p></div><button className="refresh-button" onClick={()=>refresh().catch(e=>setError(e.message))}><RefreshCw size={14}/> Refresh</button></div><div className="metric-grid"><Metric label="Total cases" value={summary?.total_cases} icon={<Activity/>}/><Metric label="Open cases" value={summary?.open_cases} icon={<HeartHandshake/>}/><Metric label="Available responders" value={summary?.available_responders} icon={<Users/>}/></div>
@@ -563,6 +570,55 @@ function Dashboard({ session, logout }: { session: Session; logout: () => void }
   )}
   </main></div>
 }
+function IncidentMap({cases}:{cases:RescueCase[]}) {
+  const host = useRef<HTMLDivElement|null>(null)
+  const [ready,setReady] = useState(false)
+  const [mapError,setMapError] = useState('')
+  useEffect(()=>{
+    let map:any; let disposed=false
+    const load=()=>{
+      if(disposed||!host.current||!window.L)return
+      const L=window.L
+      map=L.map(host.current).setView([11.6643,78.1460],11)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map)
+      const points=cases.filter(c=>typeof c.latitude==='number'&&typeof c.longitude==='number')
+      points.forEach(c=>{const popup=document.createElement('div');popup.textContent=`${c.public_id} · ${c.animal_category} · ${c.status.replaceAll('_',' ')} · ${c.priority}`;L.marker([c.latitude,c.longitude]).addTo(map).bindPopup(popup)})
+      if(points.length){const bounds=L.latLngBounds(points.map(c=>[c.latitude,c.longitude]));map.fitBounds(bounds,{padding:[30,30],maxZoom:14})}
+      setReady(true)
+    }
+    if(!document.querySelector('link[data-leaflet]')){const link=document.createElement('link');link.rel='stylesheet';link.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';link.dataset.leaflet='true';document.head.appendChild(link)}
+    if(window.L){load()}else{
+      let script=document.querySelector<HTMLScriptElement>('script[data-leaflet]')
+      if(!script){script=document.createElement('script');script.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';script.dataset.leaflet='true';document.body.appendChild(script)}
+      script.addEventListener('load',load);script.addEventListener('error',()=>setMapError('Map library could not be loaded. Check your internet connection.'))
+    }
+    return ()=>{disposed=true;if(map)map.remove()}
+  },[cases])
+  return <section className="case-section"><div className="section-heading"><div><h2>Incident map</h2><p>Only cases visible to your signed-in role are shown. Cases without coordinates appear in the list below.</p></div><span className="live-label">OPENSTREETMAP</span></div><div ref={host} style={{height:440,width:'100%',borderRadius:16,overflow:'hidden',background:'#e8eee8'}}/>{mapError&&<div className="error-box">{mapError}</div>}{!ready&&<p className="muted">Loading map…</p>}<div className="case-list" style={{marginTop:14}}>{cases.filter(c=>c.latitude===null||c.longitude===null).map(c=><div className="case-row" key={c.id}><MapPin size={16}/><div className="case-row-main"><b>{c.public_id}</b><span>{c.landmark||c.address_text||'No coordinates supplied'}</span></div></div>)}</div><p className="muted" style={{fontSize:11}}>Map tiles are provided by OpenStreetMap. Location visibility follows the cases returned by the API.</p></section>
+}
+
+function HandoffWorkspace({token,cases,onChanged}:{token:string;cases:RescueCase[];onChanged:()=>void}) {
+  const [items,setItems]=useState<Handoff[]>([]);const [orgs,setOrgs]=useState<Organization[]>([]);const [caseId,setCaseId]=useState('');const [target,setTarget]=useState('');const [reason,setReason]=useState('');const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [message,setMessage]=useState('')
+  const refresh=async()=>{const [h,o]=await Promise.all([handoffApi.list(token),handoffApi.organizations(token)]);setItems(h);setOrgs(o.filter(x=>x.verified))}
+  useEffect(()=>{refresh().catch(e=>setError(e.message))},[token])
+  const submit=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');setMessage('');try{await handoffApi.request(token,caseId,target,reason);setMessage('Handoff request sent. Ownership remains with the current organization until accepted.');setReason('');await refresh();onChanged()}catch(e){setError(e instanceof Error?e.message:'Unable to request handoff')}finally{setBusy(false)}}
+  const respond=async(item:Handoff,accept:boolean)=>{setBusy(true);setError('');try{if(accept)await handoffApi.accept(token,item.id);else await handoffApi.decline(token,item.id,'The receiving organization cannot accept this case at this time.');await refresh();onChanged()}catch(e){setError(e instanceof Error?e.message:'Unable to update handoff')}finally{setBusy(false)}}
+  const handoffCases=cases.filter(c=>['ASSIGNED','IN_PROGRESS','ON_SCENE','EN_ROUTE','ARRIVED','RESCUE_IN_PROGRESS','RESCUED','VERIFICATION_PENDING'].includes(c.status))
+  return <section className="case-section"><div className="section-heading"><div><h2>NGO handoff management</h2><p>Requests transfer ownership only after the receiving organization explicitly accepts.</p></div><span className="live-label">DATABASE WORKFLOW</span></div>{message&&<div className="success-box">{message}</div>}{error&&<div className="error-box">{error}</div>}<form className="triage-form" onSubmit={submit}><b>Request a case handoff</b><label>Case<select required value={caseId} onChange={e=>setCaseId(e.target.value)}><option value="">Select a case</option>{handoffCases.map(c=><option key={c.public_id} value={c.public_id}>{c.public_id} · {c.animal_category} · {c.status}</option>)}</select></label><label>Receiving organization<select required value={target} onChange={e=>setTarget(e.target.value)}><option value="">Select verified organization</option>{orgs.map(o=><option key={o.id} value={o.id}>{o.name} · {o.city}</option>)}</select></label><label>Reason<textarea required minLength={8} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Explain why the receiving NGO is better placed to continue this case"/></label><button className="button button-primary" disabled={busy||!caseId||!target||reason.trim().length<8}>{busy?'Sending…':'Send handoff request'}</button></form><h3 style={{marginTop:24}}>Handoff history and incoming requests</h3>{items.length===0?<div className="empty-state">No handoff requests yet.</div>:items.map(item=><div className="evidence-item" key={item.id}><b>{item.case_public_id||'Case'} · {item.status}</b><p>{item.from_organization} → {item.to_organization}</p><p>{item.reason}</p><small>Deadline: {new Date(item.deadline_at).toLocaleString()}</small>{item.incoming&&item.status==='PENDING'&&<div style={{display:'flex',gap:8,marginTop:10}}><button className="button button-primary" disabled={busy} onClick={()=>respond(item,true)}>Accept handoff</button><button className="button button-light" disabled={busy} onClick={()=>respond(item,false)}>Decline</button></div>}</div>)}</section>
+}
+
+declare global { interface Window { L?: any } }
+
+function AdminWorkspace({token}:{token:string}) {
+ const [users,setUsers]=useState<User[]>([]);const [orgs,setOrgs]=useState<Organization[]>([]);const [orgName,setOrgName]=useState('');const [fullName,setFullName]=useState('');const [city,setCity]=useState('Salem');const [newEmail,setNewEmail]=useState('');const [newPassword,setNewPassword]=useState('');const [newRole,setNewRole]=useState<'citizen'|'rescuer'|'coordinator'>('coordinator');const [newOrg,setNewOrg]=useState('');const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [message,setMessage]=useState('')
+ const refresh=async()=>{const [u,o]=await Promise.all([adminApi.users(token),handoffApi.organizations(token)]);setUsers(u);setOrgs(o)}
+ useEffect(()=>{refresh().catch(e=>setError(e.message))},[token])
+ const toggle=async(user:User)=>{setBusy(true);setError('');try{await adminApi.setUserStatus(token,user.id,!user.is_active);await refresh()}catch(e){setError(e instanceof Error?e.message:'Could not update user')}finally{setBusy(false)}}
+ const create=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');setMessage('');try{await adminApi.createOrganization(token,orgName,city);setOrgName('');setMessage('Organization created. It remains unverified until an administrator verifies it.');await refresh()}catch(e){setError(e instanceof Error?e.message:'Could not create organization')}finally{setBusy(false)}};const createUser=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');setMessage('');try{await adminApi.createUser(token,{full_name:fullName,email:newEmail,password:newPassword,role:newRole,organization_id:newRole==='coordinator'?newOrg:undefined});setFullName('');setNewEmail('');setNewPassword('');setMessage('Account created.');await refresh()}catch(e){setError(e instanceof Error?e.message:'Could not create account')}finally{setBusy(false)}}
+ const verify=async(org:Organization)=>{setBusy(true);setError('');try{await adminApi.verifyOrganization(token,org.id,!org.verified);await refresh()}catch(e){setError(e instanceof Error?e.message:'Could not update organization')}finally{setBusy(false)}};const verifyResponder=async(user:User)=>{setBusy(true);setError('');try{await adminApi.setResponderVerification(token,user.id,!user.is_verified);await refresh()}catch(e){setError(e instanceof Error?e.message:'Could not update responder verification')}finally{setBusy(false)}}
+ return <section className="case-section"><div className="section-heading"><div><h2>Administration</h2><p>Manage platform accounts and review organization verification.</p></div><span className="live-label">ADMIN ONLY</span></div>{error&&<div className="error-box">{error}</div>}{message&&<div className="success-box">{message}</div>}<h3>Users</h3>{users.map(u=><div className="evidence-item" key={u.id}><b>{u.full_name} · {u.role}</b><p>{u.email} · {u.is_active?'Active':'Disabled'} · {u.is_verified?'Verified':'Unverified'}</p><button className="button button-light" disabled={busy} onClick={()=>toggle(u)}>{u.is_active?'Deactivate':'Activate'}</button>{u.role==='rescuer'&&<button className="button button-light" disabled={busy} onClick={()=>verifyResponder(u)}>{u.is_verified?'Revoke responder verification':'Verify responder'}</button>}</div>)}<form className="triage-form" onSubmit={createUser}><b>Create platform account</b><label>Full name<input required minLength={2} value={fullName} onChange={e=>setFullName(e.target.value)}/></label><label>Email<input required type="email" value={newEmail} onChange={e=>setNewEmail(e.target.value)}/></label><label>Temporary password (10+ characters)<input required minLength={10} type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)}/></label><label>Role<select value={newRole} onChange={e=>setNewRole(e.target.value as 'citizen'|'rescuer'|'coordinator')}><option value="coordinator">NGO coordinator</option><option value="rescuer">Responder</option><option value="citizen">Citizen</option></select></label>{newRole==='coordinator'&&<label>Organization<select required value={newOrg} onChange={e=>setNewOrg(e.target.value)}><option value="">Select organization</option>{orgs.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label>}<button className="button button-primary" disabled={busy||!newEmail||newPassword.length<10||(newRole==='coordinator'&&!newOrg)}>Create account</button></form><h3 style={{marginTop:24}}>Organizations</h3>{orgs.map(o=><div className="evidence-item" key={o.id}><b>{o.name}</b><p>{o.city}, {o.state} · {o.verified?'Verified':'Pending verification'}</p><button className="button button-light" disabled={busy} onClick={()=>verify(o)}>{o.verified?'Revoke verification':'Verify organization'}</button></div>)}<form className="triage-form" onSubmit={create}><b>Register organization</b><label>Organization name<input required minLength={3} value={orgName} onChange={e=>setOrgName(e.target.value)}/></label><label>City<input value={city} onChange={e=>setCity(e.target.value)}/></label><button className="button button-primary" disabled={busy||orgName.trim().length<3}>Create organization</button></form></section>
+}
+
 function ResponderWorkspace({token,offers,onChanged}:{token:string;offers:AssignmentOffer[];onChanged:()=>void}) {
  const [available,setAvailable]=useState<boolean|null>(null); const [verified,setVerified]=useState(false); const [species,setSpecies]=useState('dog, cat'); const [radius,setRadius]=useState('20'); const [latitude,setLatitude]=useState('11.6643'); const [longitude,setLongitude]=useState('78.1460'); const [capacity,setCapacity]=useState('2'); const [busy,setBusy]=useState(false); const [error,setError]=useState(''); const [reason,setReason]=useState('')
  useEffect(()=>{responderApi.profile(token).then(p=>{setAvailable(p.is_available);setVerified(p.verified);setSpecies(p.species.join(', '));setRadius(String(p.service_radius_km));setLatitude(p.latitude===null?'':String(p.latitude));setLongitude(p.longitude===null?'':String(p.longitude));setCapacity(String(p.capacity))}).catch(e=>setError(e.message))},[token])
@@ -574,15 +630,18 @@ function ResponderWorkspace({token,offers,onChanged}:{token:string;offers:Assign
 
 function ReportForm({token,onCreated}:{token:string;onCreated:(item:RescueCase)=>void}) {
  const [animal,setAnimal]=useState('Dog'); const [description,setDescription]=useState(''); const [landmark,setLandmark]=useState(''); const [address,setAddress]=useState(''); const [phone,setPhone]=useState(''); const [lat,setLat]=useState(''); const [lon,setLon]=useState(''); const [photo,setPhoto]=useState<File|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState('')
- const [showAi, setShowAi] = useState(false)
+ const [showAi, setShowAi] = useState(false); const [imageBusy,setImageBusy]=useState(false); const [imageResult,setImageResult]=useState('')
  const [createdCase, setCreatedCase] = useState<RescueCase | null>(null)
 
  const applyAi = (ex: IncidentExtraction) => {
    if (ex.animal_category) setAnimal(ex.animal_category.charAt(0).toUpperCase() + ex.animal_category.slice(1))
+   if (ex.location_text && !address) setAddress(ex.location_text)
+   if (ex.injury_description && !description.toLowerCase().includes(ex.injury_description.toLowerCase())) setDescription(`${description}\n\nAI-extracted detail (please verify): ${ex.injury_description}`)
    setShowAi(false)
  }
+ const classifyPhoto=async()=>{if(!photo)return;setImageBusy(true);setImageResult('');try{const result=await aiApi.classifyImage(token,photo);if(result.available&&result.classification){setImageResult(`${result.classification} · ${Math.round((result.confidence??0)*100)}% confidence. Confirm manually before submitting.`);if((result.confidence??0)>=0.75)setAnimal(result.classification)}else setImageResult(result.message||'Image classification unavailable. Choose the animal manually.')}catch(e){setImageResult(e instanceof Error?e.message:'Image classification failed. Choose manually.')}finally{setImageBusy(false)}}
 
- const submit=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');try{const item=await caseApi.create(token,{animal_category:animal,description,landmark:landmark||undefined,address_text:address||undefined,reporter_phone:phone||undefined,latitude:lat?Number(lat):undefined,longitude:lon?Number(lon):undefined});if(photo)await caseApi.uploadPhoto(token,item.public_id,photo);setCreatedCase(item);onCreated(item);setDescription('');setPhoto(null)}catch(err){setError(err instanceof Error?err.message:'Could not submit report')}finally{setBusy(false)}}
+ const submit=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');try{const item=await caseApi.create(token,{animal_category:animal,description,landmark:landmark||undefined,address_text:address||undefined,reporter_phone:phone||undefined,latitude:lat?Number(lat):undefined,longitude:lon?Number(lon):undefined});setCreatedCase(item);onCreated(item);setDescription('');if(photo){try{await caseApi.uploadPhoto(token,item.public_id,photo)}catch(photoError){setError(`Case ${item.public_id} was created, but the photo could not be uploaded: ${photoError instanceof Error?photoError.message:'upload failed'}`)}}setPhoto(null)}catch(err){setError(err instanceof Error?err.message:'Could not submit report')}finally{setBusy(false)}}
  const locate=()=>{if(!navigator.geolocation){setError('Location is not available in this browser. Enter it manually.');return}navigator.geolocation.getCurrentPosition(p=>{setLat(p.coords.latitude.toFixed(6));setLon(p.coords.longitude.toFixed(6))},()=>setError('Location permission denied. You can enter the location manually.'),{enableHighAccuracy:true,timeout:10000})}
  return <section className="report-panel"><div className="section-heading"><div><h2><Plus size={17}/> Report an animal emergency</h2><p>Submit confirmed details. No report is sent until you press the button.</p></div></div><form className="report-form" onSubmit={submit}><div className="form-grid"><label>Animal category<select value={animal} onChange={e=>setAnimal(e.target.value)}><option>Dog</option><option>Cat</option><option>Cattle</option><option>Bird</option><option>Wildlife</option><option>Other</option></select></label><label>Contact phone (optional)<input value={phone} onChange={e=>setPhone(e.target.value)} placeholder="Your contact number"/></label><label className="wide-field">What happened?
    <div className="desc-row">
@@ -595,7 +654,7 @@ function ReportForm({token,onCreated}:{token:string;onCreated:(item:RescueCase)=
      <AiPanel token={token} description={description} onApply={applyAi} onDismiss={() => setShowAi(false)}/>
    </div>
  )}
- <label>Landmark<input value={landmark} onChange={e=>setLandmark(e.target.value)} placeholder="Near bus stand, Salem"/></label><label>Address / area<input value={address} onChange={e=>setAddress(e.target.value)} placeholder="Street, area, city"/></label><label>Latitude (optional)<input type="number" step="any" value={lat} onChange={e=>setLat(e.target.value)} placeholder="11.6643"/></label><label>Longitude (optional)<input type="number" step="any" value={lon} onChange={e=>setLon(e.target.value)} placeholder="78.1460"/></label><div className="location-action"><button type="button" className="button button-light" onClick={locate}><MapPin size={15}/> Use my location</button><span>Location is shared only with authorized case staff.</span></div><label className="wide-field">Photograph (JPEG, PNG or WebP · max 5 MB)<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>setPhoto(e.target.files?.[0]??null)}/></label>
+ <label>Landmark<input value={landmark} onChange={e=>setLandmark(e.target.value)} placeholder="Near bus stand, Salem"/></label><label>Address / area<input value={address} onChange={e=>setAddress(e.target.value)} placeholder="Street, area, city"/></label><label>Latitude (optional)<input type="number" step="any" value={lat} onChange={e=>setLat(e.target.value)} placeholder="11.6643"/></label><label>Longitude (optional)<input type="number" step="any" value={lon} onChange={e=>setLon(e.target.value)} placeholder="78.1460"/></label><div className="location-action"><button type="button" className="button button-light" onClick={locate}><MapPin size={15}/> Use my location</button><span>Location is shared only with authorized case staff.</span></div><label className="wide-field">Photograph (JPEG, PNG or WebP · max 5 MB)<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>{setPhoto(e.target.files?.[0]??null);setImageResult('')}}/></label>{photo&&<div className="wide-field"><button type="button" className="button button-light" disabled={imageBusy} onClick={classifyPhoto}>{imageBusy?'Analyzing image…':'✨ Identify animal from image (optional)'}</button>{imageResult&&<p className="muted">{imageResult}</p>}</div>}
  </div>{error&&<div className="error-box">{error}</div>}<div className="report-consent"><ShieldCheck size={16}/> I confirm these details are accurate to the best of my knowledge. Priority is a non-medical suggestion and will be reviewed.</div><button className="button button-primary" disabled={busy||description.trim().length<10}>{busy?'Submitting…':'Submit emergency report'} <ArrowRight size={16}/></button></form>
  <VoicePanel token={token} casePublicId={createdCase?.public_id}/>
  </section>
@@ -610,7 +669,7 @@ function CaseDetails({item,canManage,canRespond,token,onTriage,onProgress,onAssi
  const triage=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError('');try{const updated=await caseApi.triage(token,item.public_id,{priority,reason});onTriage(updated)}catch(err){setError(err instanceof Error?err.message:'Triage update failed')}finally{setBusy(false)}}
 
  const verificationStatuses = ['VERIFICATION_PENDING']
- const closableStatuses = ['VERIFIED', 'REJECTED', 'CANCELLED', 'RESCUED']
+ const closableStatuses = ['VERIFIED', 'REJECTED', 'CANCELLED']
 
  return <section className="detail-panel"><div className="detail-header"><div><span className="eyebrow">CASE DETAILS</span><h2>{item.public_id}</h2><p>{item.animal_category} · {item.status.replaceAll('_',' ')}</p></div><button className="refresh-button" onClick={onClose}>Close</button></div><div className="detail-grid"><div><b>Incident description</b><p>{item.description}</p><b>Location</b><p>{item.landmark||item.address_text||'Not supplied'} {item.latitude!==null&&item.longitude!==null?`(${item.latitude}, ${item.longitude})`:''}</p><b>Priority explanation</b><p>{item.triage_reason||'Awaiting review'}</p>{item.needs_human_review&&<div className="review-note"><AlertTriangle size={15}/> Human review required</div>}{item.possible_duplicates.length>0&&<div className="duplicate-box"><b>Possible duplicate reports — coordinator review required</b>{item.possible_duplicates.map(d=><p key={d.public_id}>{d.public_id} · {d.distance_km} km away · {d.status}</p>)}</div>}</div><div><b>Report summary</b><p>Submitted {new Date(item.created_at).toLocaleString()}</p><p>Photograph: {item.has_photo?'Uploaded':'Not provided'}</p><p>Contact: {item.reporter_phone||'Not provided'}</p>{canManage&&<form className="triage-form" onSubmit={triage}><b>Coordinator triage decision</b><label>Priority<select value={priority} onChange={e=>setPriority(e.target.value)}><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>NEEDS_REVIEW</option></select></label><label>Reason for decision<textarea required minLength={8} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Explain why this priority is appropriate"/></label>{error&&<div className="error-box">{error}</div>}<button className="button button-primary" disabled={busy||reason.trim().length<8}>{busy?'Saving…':'Confirm triage'}</button></form>}
 

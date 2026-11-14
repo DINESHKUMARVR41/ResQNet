@@ -1,20 +1,17 @@
-# ResQNet Backend Startup Script (Windows PowerShell)
-Set-Location d:\ResQNet\backend
-if (-not (Test-Path .\.venv)) {
-    Write-Host "Creating virtual environment..."
+# Start the ResQNet FastAPI backend from this extracted project folder.
+$ErrorActionPreference = 'Stop'
+Set-Location (Join-Path $PSScriptRoot 'backend')
+if (-not (Test-Path '.\.venv')) {
+    Write-Host 'Creating Python virtual environment...'
     python -m venv .venv
 }
 .\.venv\Scripts\Activate.ps1
-if (-not (Test-Path .\requirements.txt)) {
-    Write-Host "requirements.txt not found!"
-    exit 1
+if (-not (Test-Path '.\.env')) {
+    Copy-Item '.\.env.example' '.\.env'
+    Write-Host 'Created backend\.env. Review SECRET_KEY and other settings before deployment.'
 }
-pip install -r requirements.txt --quiet
-if (-not (Test-Path .\.env)) {
-    Copy-Item .\.env.example .\.env
-    Write-Host "Created .env from example. Edit it before production use."
-}
+python -m pip install -r requirements.txt
 python -m alembic upgrade head
-Write-Host "Starting ResQNet Backend on http://localhost:8000"
-Write-Host "API docs at http://localhost:8000/docs"
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+Write-Host 'ResQNet API: http://localhost:8000'
+Write-Host 'API documentation: http://localhost:8000/docs'
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000

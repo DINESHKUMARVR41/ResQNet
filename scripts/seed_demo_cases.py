@@ -1,7 +1,9 @@
 """Insert two clearly synthetic Salem emergency reports for a local demo."""
 import os, sys
 from datetime import datetime, timezone
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+sys.path.insert(0, BACKEND_DIR)
+os.chdir(BACKEND_DIR)
 os.environ.setdefault("SEED_DEMO_DATA", "true")
 from sqlalchemy import select
 from app.core.database import SessionLocal, Base, engine

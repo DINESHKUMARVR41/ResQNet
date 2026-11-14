@@ -16,6 +16,7 @@ The default local database is SQLite for a zero-configuration first run. Set `DA
 Demo accounts (development only; password for all is `ResQNetDemo!2026`):
 - citizen@resqnet.demo
 - rescuer@resqnet.demo
+- ngo@resqnet.demo (uses the coordinator role and NGO workspace)
 - coordinator@resqnet.demo
 - admin@resqnet.demo
 

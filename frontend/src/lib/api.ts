@@ -1,11 +1,58 @@
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1'
+const API_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api/v1').replace(/\/+$/, '')
 export type UserRole = 'citizen' | 'rescuer' | 'coordinator' | 'admin'
 export type User = { id: string; full_name: string; email: string; role: UserRole; is_active: boolean; is_verified: boolean }
 export type AuthResponse = { access_token: string; token_type: string; user: User }
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+function getErrorMessage(status: number, data: unknown): string {
+  if (status === 401) return 'Invalid email or password.'
+  if (status === 403) return 'You are not authorized to access this dashboard.'
+  if (status >= 500) return 'ResQNet server encountered an error. Please try again.'
+  if (data && typeof data === 'object' && 'detail' in data && typeof data.detail === 'string') {
+    return data.detail
+  }
+  return `Request failed (${status})`
+}
+
+async function fetchResponse(path: string, options: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${API_URL}${path}`, options)
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new ApiError('Unable to connect to ResQNet server. Please check whether the backend is running.', 0)
+    }
+    throw error
+  }
+}
+
+async function parseResponse(response: Response): Promise<unknown> {
+  if (response.status === 204) return undefined
+  const body = await response.text()
+  if (!body.trim()) return undefined
+  try {
+    return JSON.parse(body)
+  } catch {
+    return response.ok ? undefined : { detail: body }
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.detail ?? `Request failed (${response.status})`)
+  const headers = new Headers(options.headers)
+  if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
+  const isMultipart = typeof FormData !== 'undefined' && options.body instanceof FormData
+  // Never set Content-Type for FormData: the browser must add its multipart boundary.
+  if (!isMultipart && options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  const response = await fetchResponse(path, { ...options, headers })
+  const data = await parseResponse(response)
+  if (!response.ok) throw new ApiError(getErrorMessage(response.status, data), response.status)
   return data as T
 }
 export const api = {
@@ -13,6 +60,16 @@ export const api = {
   register: (payload: { full_name: string; email: string; password: string; role: 'citizen' | 'rescuer' }) => request<AuthResponse>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   me: (token: string) => request<User>('/auth/me', {}, token),
   summary: (token: string) => request<{ role: string; total_cases: number; open_cases: number; available_responders: number; data_label: string }>('/dashboard/summary', {}, token),
+  uploadAudioReport: async (token: string, publicId: string, body: FormData) => {
+    const response = await fetchResponse(`/cases/${encodeURIComponent(publicId)}/audio-report`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body,
+    })
+    const data = await parseResponse(response)
+    if (!response.ok) throw new ApiError(getErrorMessage(response.status, data), response.status)
+    return data as { transcription?: string; note?: string }
+  },
 }
 
 export type CaseEvent = { id: string; event_type: string; from_status: string | null; to_status: string | null; message: string; created_at: string; actor_name: string | null }
@@ -32,9 +89,9 @@ export const caseApi = {
   triage: (token: string, publicId: string, payload: { priority: string; reason: string }) => request<RescueCase>(`/cases/${encodeURIComponent(publicId)}/triage`, { method: 'PATCH', body: JSON.stringify(payload) }, token),
   uploadPhoto: async (token: string, publicId: string, photo: File) => {
     const body = new FormData(); body.append('photo', photo)
-    const response = await fetch(`${API_URL}/cases/${encodeURIComponent(publicId)}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(data.detail ?? `Upload failed (${response.status})`)
+    const response = await fetchResponse(`/cases/${encodeURIComponent(publicId)}/photo`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body })
+    const data = await parseResponse(response)
+    if (!response.ok) throw new ApiError(getErrorMessage(response.status, data), response.status)
     return data as { message: string; has_photo: boolean }
   }
 }
@@ -88,6 +145,14 @@ export const aiApi = {
     }),
   status: (token: string) =>
     fetchJson<AiStatus>('/ai/status', { headers: { Authorization: `Bearer ${token}` } }),
+  saveVoiceTranscript: (token:string,publicId:string,transcript:string) => request<{status:string;description:string}>(`/cases/${encodeURIComponent(publicId)}/voice-transcript`,{method:'PATCH',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({transcript})}),
+  classifyImage: async (token: string, file: File) => {
+    const body = new FormData(); body.append('file', file)
+    const response = await fetchResponse('/ai/classify-image', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body })
+    const data = await parseResponse(response)
+    if (!response.ok) throw new ApiError(getErrorMessage(response.status, data), response.status)
+    return data as {available:boolean;classification:string|null;confidence:number|null;message?:string;visible_evidence?:string;uncertainty?:string;requires_user_confirmation?:boolean}
+  },
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────
@@ -106,6 +171,11 @@ export const evidenceApi = {
     fetchJson<Evidence[]>(`/cases/${publicId}/evidence`, { headers: { Authorization: `Bearer ${token}` } }),
   submit: (token: string, publicId: string, formData: FormData) =>
     fetchJson<{ id: string }>(`/cases/${publicId}/evidence`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: formData }),
+  download: async (token: string, publicId: string, evidenceId: string) => {
+    const response = await fetchResponse(`/cases/${encodeURIComponent(publicId)}/evidence/${encodeURIComponent(evidenceId)}/file`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!response.ok) { const data = await parseResponse(response); throw new ApiError(getErrorMessage(response.status, data), response.status) }
+    return response.blob()
+  },
   verify: (token: string, publicId: string, decision: string, reason: string) =>
     fetchJson<{ decision: string; case_status: string }>(`/cases/${publicId}/verify`, {
       method: 'POST',
@@ -134,4 +204,23 @@ export const progressExtApi = {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
     }),
+}
+
+export type Organization = { id: string; name: string; type: string; city: string; state: string; verified: boolean }
+export type Handoff = { id: string; case_public_id: string | null; case_description: string; from_organization_id: string | null; from_organization: string; to_organization_id: string; to_organization: string; status: string; reason: string; deadline_at: string; created_at: string; incoming: boolean }
+export const handoffApi = {
+  list: (token: string) => request<Handoff[]>('/coordinator/handoffs', { headers: { Authorization: `Bearer ${token}` } }),
+  organizations: (token: string) => request<Organization[]>('/coordinator/organizations', { headers: { Authorization: `Bearer ${token}` } }),
+  request: (token: string, publicId: string, to_organization_id: string, reason: string) => request<{handoff_id:string;status:string}>(`/coordinator/cases/${encodeURIComponent(publicId)}/handoffs`, { method:'POST', headers:{Authorization:`Bearer ${token}`}, body:JSON.stringify({to_organization_id,reason}) }),
+  accept: (token: string, id: string) => request<{status:string}>(`/coordinator/handoffs/${encodeURIComponent(id)}/accept`, { method:'POST', headers:{Authorization:`Bearer ${token}`} }),
+  decline: (token: string, id: string, reason: string) => request<{status:string}>(`/coordinator/handoffs/${encodeURIComponent(id)}/decline`, { method:'POST', headers:{Authorization:`Bearer ${token}`}, body:JSON.stringify({reason}) }),
+}
+
+export const adminApi = {
+  users: (token:string) => request<User[]>('/admin/users',{headers:{Authorization:`Bearer ${token}`}}),
+  createUser: (token:string,payload:{full_name:string;email:string;password:string;role:'citizen'|'rescuer'|'coordinator';organization_id?:string}) => request<User>('/admin/users',{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify(payload)}),
+  setUserStatus: (token:string,id:string,is_active:boolean) => request<{id:string;is_active:boolean}>(`/admin/users/${encodeURIComponent(id)}/status`,{method:'PATCH',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({is_active})}),
+  setResponderVerification: (token:string,id:string,verified:boolean) => request<{id:string;is_verified:boolean}>(`/admin/users/${encodeURIComponent(id)}/verification`,{method:'PATCH',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({verified})}),
+  createOrganization: (token:string,name:string,city:string) => request<Organization>('/admin/organizations',{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({name,city,type:'ngo'})}),
+  verifyOrganization: (token:string,id:string,verified:boolean) => request<{id:string;verified:boolean}>(`/admin/organizations/${encodeURIComponent(id)}/verification`,{method:'PATCH',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({verified})}),
 }

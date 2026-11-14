@@ -54,6 +54,92 @@ def list_organizations(_: User = Depends(require_roles(UserRole.ADMIN, UserRole.
     organizations = db.scalars(select(Organization).order_by(Organization.name)).all()
     return [{"id": o.id, "name": o.name, "type": o.organization_type, "city": o.city, "state": o.state, "verified": o.is_verified} for o in organizations]
 
+@router.post("/admin/users", status_code=201)
+def admin_create_user(payload: dict, _: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    full_name = str(payload.get("full_name", "")).strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    try:
+        role = UserRole(str(payload.get("role", "")))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid account role")
+    if role == UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin accounts cannot be created through this endpoint")
+    if len(full_name) < 2 or len(email) < 5 or len(password) < 10:
+        raise HTTPException(status_code=422, detail="Name, valid email and password of at least 10 characters are required")
+    if db.scalar(select(User.id).where(User.email == email)):
+        raise HTTPException(status_code=409, detail="Email already exists")
+    organization_id = payload.get("organization_id")
+    if role == UserRole.COORDINATOR:
+        organization = db.get(Organization, organization_id) if organization_id else None
+        if not organization or not organization.is_verified:
+            raise HTTPException(status_code=422, detail="A coordinator must be assigned to an existing verified organization")
+    user = User(full_name=full_name[:120], email=email, password_hash=hash_password(password), role=role,
+                organization_id=organization_id if role == UserRole.COORDINATOR else None, is_active=True, is_verified=False)
+    db.add(user); db.flush()
+    if role == UserRole.RESCUER:
+        profile = ResponderProfile(user_id=user.id)
+        db.add(profile); db.flush()
+        db.add(Availability(responder_id=profile.id, is_available=False))
+    db.commit(); db.refresh(user)
+    return {"id": user.id, "full_name": user.full_name, "email": user.email, "role": user.role.value,
+            "is_active": user.is_active, "is_verified": user.is_verified}
+
+@router.patch("/admin/users/{user_id}/status")
+def set_user_status(user_id: str, payload: dict, admin: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == admin.id and payload.get("is_active") is False:
+        raise HTTPException(status_code=409, detail="You cannot deactivate your own administrator account")
+    if target.role == UserRole.ADMIN and target.is_active and payload.get("is_active") is False:
+        active_admins = db.scalar(select(func.count(User.id)).where(User.role == UserRole.ADMIN, User.is_active.is_(True))) or 0
+        if active_admins <= 1:
+            raise HTTPException(status_code=409, detail="At least one active administrator must remain")
+    if not isinstance(payload.get("is_active"), bool):
+        raise HTTPException(status_code=422, detail="is_active must be a boolean")
+    target.is_active = payload["is_active"]
+    db.commit()
+    return {"id": target.id, "is_active": target.is_active}
+
+@router.patch("/admin/users/{user_id}/verification")
+def set_user_verification(user_id: str, payload: dict, _: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.role != UserRole.RESCUER:
+        raise HTTPException(status_code=422, detail="Only responder accounts use responder verification")
+    if not isinstance(payload.get("verified"), bool):
+        raise HTTPException(status_code=422, detail="verified must be a boolean")
+    target.is_verified = payload["verified"]
+    profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == target.id))
+    if profile:
+        profile.verified_at = utcnow() if target.is_verified else None
+    db.commit()
+    return {"id": target.id, "is_verified": target.is_verified}
+
+@router.post("/admin/organizations", status_code=201)
+def create_organization(payload: dict, _: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    name = str(payload.get("name", "")).strip()
+    if len(name) < 3:
+        raise HTTPException(status_code=422, detail="Organization name must contain at least 3 characters")
+    organization = Organization(name=name[:180], organization_type=str(payload.get("type", "ngo"))[:40],
+        city=str(payload.get("city", "Salem"))[:100], state=str(payload.get("state", "Tamil Nadu"))[:100], is_verified=False)
+    db.add(organization); db.commit(); db.refresh(organization)
+    return {"id": organization.id, "name": organization.name, "type": organization.organization_type,
+        "city": organization.city, "state": organization.state, "verified": organization.is_verified}
+
+@router.patch("/admin/organizations/{organization_id}/verification")
+def verify_organization(organization_id: str, payload: dict, _: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    organization = db.get(Organization, organization_id)
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    if not isinstance(payload.get("verified"), bool):
+        raise HTTPException(status_code=422, detail="verified must be a boolean")
+    organization.is_verified = payload["verified"]
+    db.commit()
+    return {"id": organization.id, "verified": organization.is_verified}
+
 # Stage 3: citizen reporting, coordinator triage, case tracking and event history.
 import json, math, os, re, uuid
 from datetime import datetime, timedelta, timezone
@@ -64,7 +150,7 @@ from app.models.entities import CaseEvent
 from app.schemas.cases import CaseCreate, CaseRead, TriageUpdate, CaseEventRead
 from app.services.triage import suggest_priority
 
-UPLOAD_DIR = Path(os.getenv("RESQNET_UPLOAD_DIR", "uploads")).resolve()
+UPLOAD_DIR = Path(settings.upload_dir).resolve()
 ALLOWED_PHOTO_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
@@ -145,7 +231,11 @@ def list_cases(user: User = Depends(get_current_user), db: Session = Depends(get
         if not profile: return []
         case_ids = select(AssignmentOffer.case_id).where(AssignmentOffer.responder_id == profile.id, AssignmentOffer.status.in_(["PENDING", "ACCEPTED"]))
         query = query.where(Case.id.in_(case_ids))
-    elif user.role not in (UserRole.COORDINATOR, UserRole.ADMIN):
+    elif user.role == UserRole.COORDINATOR:
+        if not user.organization_id:
+            return []
+        query = query.where((Case.owner_organization_id == user.organization_id) | (Case.owner_organization_id.is_(None)))
+    elif user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Not permitted to view cases")
     cases = db.scalars(query).all()
     return [_case_read(db, c, include_events=False) for c in cases]
@@ -155,6 +245,8 @@ def get_case(public_id: str, user: User = Depends(get_current_user), db: Session
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.CITIZEN and case.reporter_id != user.id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
         raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.RESCUER:
         profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
@@ -167,6 +259,8 @@ def get_case(public_id: str, user: User = Depends(get_current_user), db: Session
 def update_case_triage(public_id: str, payload: TriageUpdate, user: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
+        raise HTTPException(status_code=404, detail="Case not found")
     if case.status not in ("REPORTED", "TRIAGED"):
         raise HTTPException(status_code=409, detail="Triage can only be changed before assignment")
     previous = case.status
@@ -183,6 +277,8 @@ async def upload_case_photo(public_id: str, photo: UploadFile = File(...), user:
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.CITIZEN and case.reporter_id != user.id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
         raise HTTPException(status_code=404, detail="Case not found")
     if user.role not in (UserRole.CITIZEN, UserRole.COORDINATOR, UserRole.ADMIN):
         raise HTTPException(status_code=403, detail="Not permitted to upload evidence for this case")
@@ -207,6 +303,8 @@ def get_case_photo(public_id: str, user: User = Depends(get_current_user), db: S
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.CITIZEN and case.reporter_id != user.id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
         raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.RESCUER:
         profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
@@ -267,9 +365,11 @@ def verify_responder(user_id: str, admin: User = Depends(require_roles(UserRole.
     return {"verified": True, "responder_id": responder.id}
 
 @router.get("/coordinator/cases/{public_id}/eligible-responders")
-def get_eligible_responders(public_id: str, _: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
+def get_eligible_responders(public_id: str, coordinator: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
+    if coordinator.role == UserRole.COORDINATOR and coordinator.organization_id and case.owner_organization_id not in (None, coordinator.organization_id):
+        raise HTTPException(status_code=404, detail="Case not found")
     return [{"responder_id": x["user"].id, "name": x["user"].full_name, "organization_id": x["profile"].organization_id,
         "distance_km": x["distance_km"], "score": x["score"], "service_radius_km": x["profile"].service_radius_km,
         "capacity": x["profile"].capacity} for x in eligible_responders(db, case)]
@@ -278,10 +378,14 @@ def get_eligible_responders(public_id: str, _: User = Depends(require_roles(User
 def assign_case(public_id: str, coordinator: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case: raise HTTPException(status_code=404, detail="Case not found")
+    if coordinator.role == UserRole.COORDINATOR and coordinator.organization_id and case.owner_organization_id not in (None, coordinator.organization_id):
+        raise HTTPException(status_code=404, detail="Case not found")
     if case.status not in ("TRIAGED", "NEEDS_COORDINATOR"):
         raise HTTPException(status_code=409, detail=f"Case must be TRIAGED before assignment (current: {case.status})")
     if db.scalar(select(AssignmentOffer.id).where(AssignmentOffer.case_id == case.id, AssignmentOffer.status == "PENDING")):
         raise HTTPException(status_code=409, detail="A pending assignment offer already exists")
+    if coordinator.role == UserRole.COORDINATOR and coordinator.organization_id:
+        case.owner_organization_id = coordinator.organization_id
     offer = issue_next_offer(db, case, coordinator.id)
     if not offer: return {"status": "NEEDS_COORDINATOR", "message": "No eligible responders. Review service area, skills, verification and availability."}
     profile = db.get(ResponderProfile, offer.responder_id); responder = db.get(User, profile.user_id)
@@ -310,10 +414,13 @@ def accept_offer(offer_id: str, user: User = Depends(require_roles(UserRole.RESC
         process_expired_offers(db); raise HTTPException(status_code=409, detail="Offer deadline expired")
     case = db.get(Case, offer.case_id)
     if case.status != "ASSIGNMENT_PENDING": raise HTTPException(status_code=409, detail="Case is no longer awaiting this offer")
-    offer.status = "ACCEPTED"; offer.responded_at = utcnow(); case.status = "ASSIGNED"; case.owner_organization_id = profile.organization_id
+    offer.status = "ACCEPTED"; offer.responded_at = utcnow(); case.status = "ASSIGNED"; case.owner_organization_id = profile.organization_id or case.owner_organization_id
     db.add(CaseEvent(case_id=case.id, actor_id=user.id, event_type="ASSIGNMENT_ACCEPTED", from_status="ASSIGNMENT_PENDING", to_status="ASSIGNED",
         message=f"{user.full_name} accepted assignment offer #{offer.attempt_no}. Case ownership transferred to the responder."))
-    db.commit(); return {"status": "ACCEPTED", "case_id": case.public_id, "message": "You are now the accountable responder for this case."}
+    db.commit()
+    from app.services.notifications import notify_case_event
+    notify_case_event(db, case.id, "ASSIGNMENT_ACCEPTED", "Responder accepted the case", f"A responder accepted case {case.public_id}.", exclude_user_id=user.id)
+    return {"status": "ACCEPTED", "case_id": case.public_id, "message": "You are now the accountable responder for this case."}
 
 @router.post("/responder/offers/{offer_id}/decline")
 def decline_offer(offer_id: str, payload: OfferResponse, user: User = Depends(require_roles(UserRole.RESCUER)), db: Session = Depends(get_db)):
@@ -325,6 +432,8 @@ def decline_offer(offer_id: str, payload: OfferResponse, user: User = Depends(re
     db.add(CaseEvent(case_id=case.id, actor_id=user.id, event_type="ASSIGNMENT_DECLINED", from_status=case.status,
         message=f"{user.full_name} declined offer #{offer.attempt_no}. Reason: {offer.response_reason}"))
     db.commit()
+    from app.services.notifications import notify_case_event
+    notify_case_event(db, case.id, "ASSIGNMENT_DECLINED", "Responder declined the offer", f"A responder declined case {case.public_id}; the next eligible responder is being checked.", exclude_user_id=user.id)
     next_offer = issue_next_offer(db, case, user.id)
     if next_offer:
         next_profile = db.get(ResponderProfile, next_offer.responder_id); next_user = db.get(User, next_profile.user_id)
@@ -334,6 +443,27 @@ def decline_offer(offer_id: str, payload: OfferResponse, user: User = Depends(re
 @router.post("/jobs/process-deadlines")
 def process_deadlines(_: User = Depends(require_roles(UserRole.ADMIN)), db: Session = Depends(get_db)):
     return {"expired_offers_processed": process_expired_offers(db)}
+
+@router.get("/coordinator/handoffs")
+def list_handoffs(user: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
+    query = select(CaseHandoff).order_by(CaseHandoff.created_at.desc()).limit(200)
+    if user.role == UserRole.COORDINATOR:
+        if not user.organization_id:
+            return []
+        query = query.where((CaseHandoff.from_organization_id == user.organization_id) | (CaseHandoff.to_organization_id == user.organization_id))
+    rows = db.scalars(query).all()
+    result = []
+    for h in rows:
+        case = db.get(Case, h.case_id)
+        source = db.get(Organization, h.from_organization_id) if h.from_organization_id else None
+        target = db.get(Organization, h.to_organization_id)
+        result.append({"id": h.id, "case_public_id": case.public_id if case else None,
+            "case_description": case.description[:180] if case else "",
+            "from_organization_id": h.from_organization_id, "from_organization": source.name if source else "Unassigned",
+            "to_organization_id": h.to_organization_id, "to_organization": target.name if target else "Unknown",
+            "status": h.status, "reason": h.reason, "deadline_at": h.deadline_at.isoformat(),
+            "created_at": h.created_at.isoformat(), "incoming": user.role == UserRole.ADMIN or h.to_organization_id == user.organization_id})
+    return result
 
 @router.post("/coordinator/cases/{public_id}/handoffs", status_code=201)
 def request_handoff(public_id: str, payload: dict, user: User = Depends(require_roles(UserRole.COORDINATOR, UserRole.ADMIN)), db: Session = Depends(get_db)):
@@ -352,6 +482,9 @@ def request_handoff(public_id: str, payload: dict, user: User = Depends(require_
         initiated_by=user.id, status="PENDING", reason=reason, deadline_at=utcnow()+timedelta(minutes=10))
     db.add(handoff); db.flush()
     db.add(CaseEvent(case_id=case.id, actor_id=user.id, event_type="HANDOFF_REQUESTED", message=f"Handoff requested to {target.name}. Current ownership remains unchanged until acceptance."))
+    from app.services.notifications import create_notification
+    for recipient in db.scalars(select(User).where(User.role == UserRole.COORDINATOR, User.organization_id == target.id, User.is_active.is_(True))).all():
+        create_notification(db, recipient.id, "HANDOFF_REQUESTED", "Incoming case handoff", f"{case.public_id}: {reason}", case.id)
     db.commit(); db.refresh(handoff)
     return {"handoff_id": handoff.id, "status": handoff.status, "deadline_at": handoff.deadline_at.isoformat(), "current_owner_organization_id": case.owner_organization_id}
 
@@ -372,6 +505,11 @@ def accept_handoff(handoff_id: str, user: User = Depends(require_roles(UserRole.
     handoff.status = "ACCEPTED"; handoff.responded_at = utcnow(); case.owner_organization_id = handoff.to_organization_id
     target = db.get(Organization, handoff.to_organization_id)
     db.add(CaseEvent(case_id=case.id, actor_id=user.id, event_type="HANDOFF_ACCEPTED", message=f"{target.name} accepted the handoff. Ownership transferred only after explicit acceptance."))
+    from app.services.notifications import create_notification
+    source_org = handoff.from_organization_id
+    if source_org:
+        for recipient in db.scalars(select(User).where(User.role == UserRole.COORDINATOR, User.organization_id == source_org, User.is_active.is_(True))).all():
+            create_notification(db, recipient.id, "HANDOFF_ACCEPTED", "Case handoff accepted", f"{case.public_id} is now owned by {target.name}.", case.id)
     db.commit(); return {"status": "ACCEPTED", "case_id": case.public_id, "owner_organization_id": case.owner_organization_id}
 
 @router.post("/coordinator/handoffs/{handoff_id}/decline")
@@ -382,6 +520,10 @@ def decline_handoff(handoff_id: str, payload: OfferResponse, user: User = Depend
     if handoff.status != "PENDING": raise HTTPException(status_code=409, detail=f"Handoff is {handoff.status.lower()}")
     handoff.status = "DECLINED"; handoff.responded_at = utcnow()
     db.add(CaseEvent(case_id=handoff.case_id, actor_id=user.id, event_type="HANDOFF_DECLINED", message=f"Receiving organization declined the handoff. Reason: {(payload.reason or 'Not provided')[:500]}. Existing ownership is unchanged."))
+    from app.services.notifications import create_notification
+    if handoff.from_organization_id:
+        for recipient in db.scalars(select(User).where(User.role == UserRole.COORDINATOR, User.organization_id == handoff.from_organization_id, User.is_active.is_(True))).all():
+            create_notification(db, recipient.id, "HANDOFF_DECLINED", "Case handoff declined", f"Handoff for case {handoff.case_id} was declined.", handoff.case_id)
     db.commit(); return {"status": "DECLINED", "owner_unchanged": True}
 
 @router.patch("/responder/cases/{public_id}/status")
@@ -425,7 +567,7 @@ def ai_status(_: User = Depends(get_current_user)):
         "features": {
             "incident_extraction": True,
             "voice_transcription": bool(settings.whisper_api_key),
-            "image_classification": False,
+            "image_classification": bool(settings.gemini_api_key),
         },
     }
 
@@ -436,6 +578,60 @@ def ai_extract_incident(payload: dict, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=422, detail="Text is required")
     result = extract_incident(text)
     return result.model_dump()
+
+@router.post("/ai/classify-image")
+async def classify_animal_image(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    """Optional Gemini vision classification. Never fabricates a result when unconfigured."""
+    allowed = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n", "image/webp": b"RIFF"}
+    mime = file.content_type or ""
+    if mime not in allowed:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG or WebP image")
+    content = await file.read(5 * 1024 * 1024 + 1)
+    if not content or len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be between 1 byte and 5 MB")
+    if not content.startswith(allowed[mime]) or (mime == "image/webp" and content[8:12] != b"WEBP"):
+        raise HTTPException(status_code=415, detail="Image signature does not match its MIME type")
+    if not settings.gemini_api_key:
+        return {"available": False, "classification": None, "confidence": None,
+                "message": "Image classification is unavailable: configure GEMINI_API_KEY. Please select the animal category manually."}
+    import base64, httpx
+    prompt = "Identify the visible animal species/category in this image. Return JSON only with keys animal_category, confidence (0 to 1), visible_evidence, uncertainty. Do not infer injuries or medical conditions. If no animal is clearly visible, return animal_category as Unknown and low confidence."
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime, "data": base64.b64encode(content).decode("ascii")}}]}],
+               "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1}}
+    try:
+        async with httpx.AsyncClient(timeout=35) as client:
+            response = await client.post(url, params={"key": settings.gemini_api_key}, json=payload)
+        response.raise_for_status()
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw)
+        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0))))
+        return {"available": True, "classification": str(parsed.get("animal_category", "Unknown"))[:80],
+                "confidence": confidence, "visible_evidence": str(parsed.get("visible_evidence", ""))[:500],
+                "uncertainty": str(parsed.get("uncertainty", ""))[:500], "requires_user_confirmation": True}
+    except Exception:
+        return {"available": False, "classification": None, "confidence": None,
+                "message": "Image classification provider failed. Continue with manual animal selection."}
+
+@router.patch("/cases/{public_id}/voice-transcript")
+def save_voice_transcript(public_id: str, payload: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    case = db.scalar(select(Case).where(Case.public_id == public_id))
+    if not case or case.reporter_id != user.id or user.role != UserRole.CITIZEN:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if case.status not in ("REPORTED", "TRIAGED"):
+        raise HTTPException(status_code=409, detail="The case description can no longer be edited after assignment")
+    transcript = str(payload.get("transcript", "")).strip()
+    if len(transcript) < 5:
+        raise HTTPException(status_code=422, detail="Transcript must contain at least 5 characters")
+    marker_text = "\n\nVoice transcript (reporter-confirmed): "
+    if "Voice transcript (reporter-confirmed):" not in case.description:
+        case.description = (case.description + marker_text + transcript)[:5000]
+    else:
+        case.description = case.description.split(marker_text)[0] + marker_text + transcript
+        case.description = case.description[:5000]
+    db.add(CaseEvent(case_id=case.id, actor_id=user.id, event_type="VOICE_TRANSCRIPT_CONFIRMED", message="Reporter confirmed and added the voice transcript to the case description."))
+    db.commit()
+    return {"status": "saved", "description": case.description}
 
 @router.post("/cases/{public_id}/audio-report", status_code=201)
 async def upload_audio_report(
@@ -449,6 +645,14 @@ async def upload_audio_report(
         raise HTTPException(status_code=404, detail="Case not found")
     if user.role == UserRole.CITIZEN and case.reporter_id != user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.RESCUER:
+        profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
+        if not profile or not db.scalar(select(AssignmentOffer.id).where(AssignmentOffer.case_id == case.id, AssignmentOffer.responder_id == profile.id, AssignmentOffer.status.in_(["PENDING", "ACCEPTED"]))):
+            raise HTTPException(status_code=403, detail="Not authorized for this case")
+    if user.role not in (UserRole.CITIZEN, UserRole.RESCUER, UserRole.COORDINATOR, UserRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Not authorized")
     ALLOWED_AUDIO = {
         "audio/wav", "audio/mpeg", "audio/mp3", "audio/ogg",
         "audio/webm", "audio/mp4", "audio/m4a", "video/webm",
@@ -457,8 +661,17 @@ async def upload_audio_report(
         raise HTTPException(status_code=415, detail="Unsupported audio format")
     MAX_AUDIO = 10 * 1024 * 1024
     content = await audio.read(MAX_AUDIO + 1)
+    if not content:
+        raise HTTPException(status_code=422, detail="Audio file is empty")
     if len(content) > MAX_AUDIO:
         raise HTTPException(status_code=413, detail="Audio file must not exceed 10 MB")
+    signatures = {"audio/wav": lambda b: b.startswith(b"RIFF") and b[8:12] == b"WAVE",
+                  "audio/webm": lambda b: b.startswith(b"\x1a\x45\xdf\xa3"),
+                  "video/webm": lambda b: b.startswith(b"\x1a\x45\xdf\xa3"),
+                  "audio/ogg": lambda b: b.startswith(b"OggS"),
+                  "audio/mpeg": lambda b: b.startswith(b"ID3") or (len(b) > 1 and b[0] == 0xff and (b[1] & 0xe0) == 0xe0)}
+    if audio.content_type in signatures and not signatures[audio.content_type](content):
+        raise HTTPException(status_code=415, detail="Audio signature does not match its declared type")
     audio_dir = UPLOAD_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     suffix_map = {
@@ -506,6 +719,21 @@ ALLOWED_VIDEO_TYPES = {"video/mp4": ".mp4", "video/webm": ".webm"}
 MAX_EVIDENCE_IMAGE = 10 * 1024 * 1024
 MAX_EVIDENCE_VIDEO = 50 * 1024 * 1024
 
+
+def _has_valid_file_signature(content: bytes, content_type: str) -> bool:
+    """Check file magic bytes instead of trusting the client-supplied MIME type."""
+    if content_type == "image/jpeg":
+        return content.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/webp":
+        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    if content_type == "video/mp4":
+        return len(content) >= 12 and content[4:8] == b"ftyp"
+    if content_type == "video/webm":
+        return content.startswith(b"\x1a\x45\xdf\xa3")
+    return False
+
 @router.post("/cases/{public_id}/evidence", status_code=201)
 async def submit_evidence(
     public_id: str,
@@ -533,6 +761,14 @@ async def submit_evidence(
     ))
     if not offer:
         raise HTTPException(status_code=403, detail="You must have an accepted assignment to submit evidence")
+    if gps_lat is not None and not -90 <= gps_lat <= 90:
+        raise HTTPException(status_code=422, detail="GPS latitude must be between -90 and 90")
+    if gps_lon is not None and not -180 <= gps_lon <= 180:
+        raise HTTPException(status_code=422, detail="GPS longitude must be between -180 and 180")
+    if evidence_type not in {"before_photo", "after_photo", "video", "note"}:
+        raise HTTPException(status_code=422, detail="Unsupported evidence type")
+    if evidence_type == "note" and not any((rescue_notes, animal_condition, destination, handover_details)):
+        raise HTTPException(status_code=422, detail="A note must include at least one detail")
     file_path_str = None
     file_hash_str = None
     file_size_int = None
@@ -552,7 +788,11 @@ async def submit_evidence(
             if len(content) > MAX_EVIDENCE_VIDEO:
                 raise HTTPException(status_code=413, detail="Video must not exceed 50 MB")
         else:
-            content = await file.read(MAX_EVIDENCE_IMAGE + 1)
+            raise HTTPException(status_code=415, detail="Files are only accepted for photo and video evidence")
+        if not content:
+            raise HTTPException(status_code=422, detail="Uploaded file is empty")
+        if evidence_type in ("before_photo", "after_photo", "video") and not _has_valid_file_signature(content, ct):
+            raise HTTPException(status_code=415, detail="File content does not match its declared media type")
         file_hash_str = hashlib.sha256(content).hexdigest()
         file_size_int = len(content)
         mime_str = ct
@@ -601,19 +841,16 @@ def get_evidence(
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
-    if user.role not in (UserRole.COORDINATOR, UserRole.ADMIN):
-        if user.role == UserRole.RESCUER:
-            profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
-            if not profile:
-                raise HTTPException(status_code=403, detail="Forbidden")
-            offer = db.scalar(select(AssignmentOffer).where(
-                AssignmentOffer.case_id == case.id,
-                AssignmentOffer.responder_id == profile.id,
-            ))
-            if not offer:
-                raise HTTPException(status_code=403, detail="Forbidden")
-        else:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    allowed = user.role in (UserRole.ADMIN, UserRole.COORDINATOR)
+    if user.role == UserRole.COORDINATOR and user.organization_id:
+        allowed = case.owner_organization_id in (None, user.organization_id)
+    elif user.role == UserRole.RESCUER:
+        profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
+        allowed = bool(profile and db.scalar(select(AssignmentOffer.id).where(
+            AssignmentOffer.case_id == case.id, AssignmentOffer.responder_id == profile.id,
+            AssignmentOffer.status.in_(["PENDING", "ACCEPTED"]))))
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Not permitted to view evidence")
     evidences = db.scalars(
         select(RescueEvidence)
         .where(RescueEvidence.case_id == case.id)
@@ -643,15 +880,20 @@ def get_evidence_file(
     ))
     if not evidence:
         raise HTTPException(status_code=404, detail="Evidence not found")
-    if user.role not in (UserRole.COORDINATOR, UserRole.ADMIN):
-        if user.role == UserRole.RESCUER:
-            profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
-            if not profile or evidence.responder_id != profile.id:
-                raise HTTPException(status_code=403, detail="Forbidden")
-        else:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    allowed = user.role in (UserRole.ADMIN, UserRole.COORDINATOR)
+    if user.role == UserRole.COORDINATOR and user.organization_id:
+        allowed = case.owner_organization_id in (None, user.organization_id)
+    elif user.role == UserRole.RESCUER:
+        profile = db.scalar(select(ResponderProfile).where(ResponderProfile.user_id == user.id))
+        allowed = bool(profile and evidence.responder_id == profile.id)
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Evidence not found")
     if not evidence.file_path or not Path(evidence.file_path).is_file():
         raise HTTPException(status_code=404, detail="File not available")
+    if evidence.file_hash:
+        current_hash = hashlib.sha256(Path(evidence.file_path).read_bytes()).hexdigest()
+        if current_hash != evidence.file_hash:
+            raise HTTPException(status_code=500, detail="Evidence integrity check failed; file is quarantined from download")
     return FileResponse(evidence.file_path, media_type=evidence.mime_type or "application/octet-stream")
 
 @router.post("/cases/{public_id}/verify")
@@ -662,6 +904,8 @@ def verify_case(
 ):
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
         raise HTTPException(status_code=404, detail="Case not found")
     if case.status not in ("VERIFICATION_PENDING", "RESCUED"):
         raise HTTPException(status_code=409, detail=f"Case status is {case.status}; verification not applicable")
@@ -689,16 +933,6 @@ def verify_case(
                 update_reliability_score(db, offer.responder_id)
             except Exception:
                 pass
-        try:
-            create_notification(
-                db, case.reporter_id, "RESCUE_VERIFIED",
-                "Your rescue case has been verified!",
-                f"Case {case.public_id} has been verified as successfully rescued. {reason}",
-                case_id=case.id,
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
     elif decision == "REJECTED":
         db.add(CaseEvent(
             case_id=case.id, actor_id=user.id,
@@ -712,6 +946,7 @@ def verify_case(
             message=f"Additional evidence requested by {user.full_name}. Reason: {reason}",
         ))
     db.commit()
+    notify_case_event(db, case.id, f"VERIFICATION_{decision}", "Rescue verification update", f"Case {case.public_id}: {decision.replace('_', ' ').lower()}. {reason}", exclude_user_id=user.id)
     return {"decision": decision, "case_status": case.status, "message": "Verification decision recorded."}
 
 @router.post("/cases/{public_id}/close")
@@ -722,6 +957,8 @@ def close_case(
 ):
     case = db.scalar(select(Case).where(Case.public_id == public_id))
     if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if user.role == UserRole.COORDINATOR and user.organization_id and case.owner_organization_id not in (None, user.organization_id):
         raise HTTPException(status_code=404, detail="Case not found")
     if case.status not in ("VERIFIED", "CANCELLED", "REJECTED"):
         raise HTTPException(status_code=409,
@@ -736,6 +973,7 @@ def close_case(
         message=f"Case closed by {user.full_name}. {reason}",
     ))
     db.commit()
+    notify_case_event(db, case.id, "CASE_CLOSED", "Rescue case closed", f"Case {case.public_id} has been closed. {reason}", exclude_user_id=user.id)
     return {"status": "CLOSED", "message": "Case has been closed."}
 
 # Extended progress state machine

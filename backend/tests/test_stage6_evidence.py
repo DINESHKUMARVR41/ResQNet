@@ -5,13 +5,13 @@ import pytest
 
 def _register(client, email, role="citizen", name="Test User"):
     return client.post("/api/v1/auth/register", json={
-        "full_name": name, "email": email, "password": "Test1234!",
+        "full_name": name, "email": email, "password": "StrongPass!2026",
         "role": role,
     })
 
 
 def _login(client, email):
-    r = client.post("/api/v1/auth/login", json={"email": email, "password": "Test1234!"})
+    r = client.post("/api/v1/auth/login", json={"email": email, "password": "StrongPass!2026"})
     return r.json()["access_token"]
 
 
@@ -48,7 +48,14 @@ def _setup_full_case(client):
         profile.latitude = 11.6643
         profile.longitude = 78.1460
         profile.service_radius_km = 50.0
-        db.add(Availability(responder_id=profile.id, is_available=True))
+        availability = db.scalar(select(Availability).where(Availability.responder_id == profile.id))
+        if availability is None:
+            availability = Availability(responder_id=profile.id)
+            db.add(availability)
+        # Keep this fixture deterministic: only the test responder should be eligible.
+        for other_availability in db.scalars(select(Availability)).all():
+            other_availability.is_available = other_availability.responder_id == profile.id
+        availability.is_available = True
         db.add(ResponderSkill(responder_id=profile.id, species="all"))
         db.commit()
     finally:

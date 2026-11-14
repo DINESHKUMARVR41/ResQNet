@@ -1,6 +1,8 @@
 """Comprehensive Salem demo seed script for ResQNet Stages 5-8."""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+sys.path.insert(0, BACKEND_DIR)
+os.chdir(BACKEND_DIR)
 
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
@@ -15,7 +17,7 @@ from app.models.entities import (
 # Ensure tables exist
 Base.metadata.create_all(bind=engine)
 
-PASSWORD = hash_password("Demo1234!")
+PASSWORD = hash_password("ResQNetDemo!2026")
 NOW = utcnow()
 
 
@@ -47,6 +49,7 @@ def seed():
             ("Priya Sundaram", "citizen2@resqnet.demo", UserRole.CITIZEN, None),
             ("Karthik Velan", "rescuer@resqnet.demo", UserRole.RESCUER, org1.id),
             ("Senthil Kumar", "rescuer2@resqnet.demo", UserRole.RESCUER, org2.id),
+            ("Demo NGO", "ngo@resqnet.demo", UserRole.COORDINATOR, org1.id),
             ("Lakshmi Devi", "coordinator@resqnet.demo", UserRole.COORDINATOR, org1.id),
             ("Arun Prasad", "coordinator2@resqnet.demo", UserRole.COORDINATOR, org2.id),
             ("Admin Supervisor", "admin@resqnet.demo", UserRole.ADMIN, None),
@@ -255,13 +258,13 @@ def seed():
         print("  " + "-"*56)
         print(f"  {'Role':<15} {'Email':<30} {'Password'}")
         print("  " + "-"*56)
-        print(f"  {'Citizen':<15} {'citizen@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Citizen 2':<15} {'citizen2@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Rescuer':<15} {'rescuer@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Rescuer 2':<15} {'rescuer2@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Coordinator':<15} {'coordinator@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Coordinator 2':<15} {'coordinator2@resqnet.demo':<30} Demo1234!")
-        print(f"  {'Admin':<15} {'admin@resqnet.demo':<30} Demo1234!")
+        print(f"  {'Citizen':<15} {'citizen@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Citizen 2':<15} {'citizen2@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Rescuer':<15} {'rescuer@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Rescuer 2':<15} {'rescuer2@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Coordinator':<15} {'coordinator@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Coordinator 2':<15} {'coordinator2@resqnet.demo':<30} ResQNetDemo!2026")
+        print(f"  {'Admin':<15} {'admin@resqnet.demo':<30} ResQNetDemo!2026")
         print("  " + "-"*56)
         print(f"\n  Organizations: PawsForward Animal Welfare, Samaritans Animal Trust")
         print(f"  Cases: 7 demo cases across various statuses")
